@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: #000000;
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background-color: #D4AF37;
+    color: #000000;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #000000;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #262626;
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #D4AF37;
+  }
+}
+
+@layer components {
+  .eyebrow {
+    @apply text-xs tracking-widest2 uppercase text-gold font-medium;
+  }
+
+  .gold-btn {
+    @apply bg-gold text-black font-semibold tracking-wide px-8 py-3.5 rounded-sm
+      transition-all duration-300 hover:bg-gold-soft hover:shadow-gold
+      active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  .ghost-btn {
+    @apply border border-ink-line text-white/80 font-medium tracking-wide px-8 py-3.5 rounded-sm
+      transition-all duration-300 hover:border-gold hover:text-gold;
+  }
+}
+
+/* Subtle film-grain overlay for cinematic texture */
+.grain::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
