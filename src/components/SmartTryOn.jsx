@@ -32,7 +32,7 @@ const CANVAS_H = 620
  * instead of api.picsart.io directly.
  * ---------------------------------------------------------------------------
  */
-const PICSART_API_KEY = 'YOUR_PICSART_API_KEY' // <-- replace with your real key
+const PICSART_API_KEY = 'paat-SYcppoO2FzWz3rLZCCMjNZPiLiC' // <-- replace with your real key
 const PICSART_BASE = 'https://api.picsart.io/tools/1.0'
 
 /** Converts a dataURL into a File object Picsart's multipart API accepts. */
