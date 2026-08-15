@@ -21,95 +21,186 @@ const CANVAS_H = 620
 
 /**
  * ---------------------------------------------------------------------------
- * AI ENHANCE ADAPTER
+ * PICSART API CONFIG
  * ---------------------------------------------------------------------------
- * True photorealistic compositing (matching perspective, lighting, and skin
- * texture the way a real "AI tattoo preview" tool does) requires an actual
- * image model call — that can't happen purely in client CSS. This function
- * is the single seam where that call belongs.
- *
- * It calls the Anthropic Messages API (POST /v1/messages) the same way this
- * app's own artifact runtime does — no API key is passed client-side since
- * that's handled by the host. If you deploy this SPA outside that runtime,
- * replace the body of this function with a call to your own backend that
- * wraps an image-capable model (this stays a pure static frontend either
- * way — the call target is just a config change).
- *
- * If the call fails or isn't available, we fall back to a strong local
- * canvas-based blend (skin-tone sampling + multiply + lighting match) so the
- * feature never breaks — it just degrades gracefully.
+ * SECURITY NOTE: this key ships inside the client bundle, so anyone who
+ * opens devtools can read it and make calls against your Picsart account
+ * and credit balance. This tradeoff was chosen explicitly to avoid standing
+ * up a backend. If usage/costs become a problem later, the fix is a thin
+ * serverless proxy that holds the key server-side — everything else in this
+ * file stays the same, only the fetch URLs below would point at your proxy
+ * instead of api.picsart.io directly.
  * ---------------------------------------------------------------------------
  */
-async function aiEnhanceComposite({ skinDataUrl }) {
-  try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 300,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text: 'You are assisting a tattoo try-on tool. Given this skin photo, respond ONLY with a JSON object: {"skinTone":"<light|medium|tan|deep>","lightingDirection":"<top|left|right|front>","suggestedOpacity":<0-1 number>,"suggestedContrast":<percent number, e.g. 112>,"suggestedSaturation":<percent number>}. No prose, no markdown fences.',
-              },
-              {
-                type: 'image',
-                source: { type: 'base64', media_type: 'image/jpeg', data: skinDataUrl.split(',')[1] },
-              },
-            ],
-          },
-        ],
-      }),
-    })
+const PICSART_API_KEY = 'YOUR_PICSART_API_KEY' // <-- replace with your real key
+const PICSART_BASE = 'https://api.picsart.io/tools/1.0'
 
-    if (!response.ok) throw new Error('AI enhance endpoint unavailable')
-    const data = await response.json()
-    const text = data.content?.map((b) => b.text || '').join('') || ''
-    const clean = text.replace(/```json|```/g, '').trim()
-    const parsed = JSON.parse(clean)
-
-    return {
-      source: 'ai',
-      contrast: parsed.suggestedContrast ?? 112,
-      saturation: parsed.suggestedSaturation ?? 116,
-      opacity: parsed.suggestedOpacity ?? 0.92,
-      skinTone: parsed.skinTone ?? 'medium',
-    }
-  } catch (err) {
-    // Graceful local fallback — refined below using an actual luminance
-    // sample of the uploaded skin photo.
-    return {
-      source: 'local-fallback',
-      contrast: 112,
-      saturation: 116,
-      opacity: 0.92,
-      skinTone: 'medium',
-      error: err?.message,
-    }
+/** Converts a dataURL into a File object Picsart's multipart API accepts. */
+function dataUrlToFile(dataUrl, filename) {
+  const [header, base64] = dataUrl.split(',')
+  const mimeMatch = header.match(/data:(.*?);base64/)
+  const mimeType = mimeMatch ? mimeMatch[1] : 'image/png'
+  const byteString = atob(base64)
+  const bytes = new Uint8Array(byteString.length)
+  for (let i = 0; i < byteString.length; i++) {
+    bytes[i] = byteString.charCodeAt(i)
   }
+  return new File([bytes], filename, { type: mimeType })
 }
 
-/** Samples the average luminance of an <img> via an offscreen canvas. */
-function sampleAverageLuminance(imgEl) {
-  try {
-    const c = document.createElement('canvas')
-    c.width = 32
-    c.height = 32
-    const ctx = c.getContext('2d')
-    ctx.drawImage(imgEl, 0, 0, 32, 32)
-    const { data } = ctx.getImageData(0, 0, 32, 32)
-    let total = 0
-    for (let i = 0; i < data.length; i += 4) {
-      total += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
-    }
-    return total / (data.length / 4) // 0-255
-  } catch {
-    return 128
+/** Reads a Blob/File into a data: URL string. */
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result)
+    reader.onerror = reject
+    reader.readAsDataURL(blob)
+  })
+}
+
+/**
+ * Removes the background of an image using Picsart's /removebg endpoint.
+ * Verified against Picsart's published OpenAPI schema: multipart/form-data,
+ * field `image` (binary), auth header `X-Picsart-API-Key`, JSON response
+ * shaped `{ data: { url }, status }`.
+ */
+async function picsartRemoveBackground(dataUrl) {
+  const file = dataUrlToFile(dataUrl, 'tattoo.png')
+  const form = new FormData()
+  form.append('image', file)
+  form.append('output_type', 'cutout')
+  form.append('format', 'PNG')
+
+  const response = await fetch(`${PICSART_BASE}/removebg`, {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'X-Picsart-API-Key': PICSART_API_KEY,
+    },
+    body: form,
+  })
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    throw new Error(`Picsart removebg failed (${response.status}): ${detail.slice(0, 200)}`)
   }
+
+  const json = await response.json()
+  const resultUrl = json?.data?.url
+  if (!resultUrl) throw new Error('Picsart removebg returned no result URL')
+
+  // Fetch the hosted result back into a data URL so it survives in local state
+  // without depending on Picsart's CDN staying reachable for the rest of the session.
+  const resultBlob = await fetch(resultUrl).then((r) => r.blob())
+  return blobToDataUrl(resultBlob)
+}
+
+/**
+ * Composites the tattoo onto the skin photo using Picsart's /blend endpoint.
+ * Verified against Picsart's published OpenAPI schema: multipart/form-data,
+ * fields `image` (base), `overlay_image` (binary), `opacity` (0-100),
+ * `blend_mode` (enum incl. "multiply"), `format`. Response shaped like removebg.
+ *
+ * Blend has no x/y/size/rotation params of its own — it overlays at full
+ * canvas registration. So the tattoo is first pre-rendered client-side (at
+ * its current position/size/rotation) onto a transparent layer the exact
+ * pixel dimensions of the skin photo, and that flattened layer is what gets
+ * sent as overlay_image.
+ */
+async function picsartBlend({ skinDataUrl, overlayDataUrl, opacityPercent = 90 }) {
+  const [skinFile, overlayFile] = await Promise.all([
+    dataUrlToFile(skinDataUrl, 'skin.jpg'),
+    dataUrlToFile(overlayDataUrl, 'overlay.png'),
+  ])
+
+  const form = new FormData()
+  form.append('image', skinFile)
+  form.append('overlay_image', overlayFile)
+  form.append('opacity', String(Math.round(opacityPercent)))
+  form.append('blend_mode', 'multiply')
+  form.append('format', 'PNG')
+
+  const response = await fetch(`${PICSART_BASE}/blend`, {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'X-Picsart-API-Key': PICSART_API_KEY,
+    },
+    body: form,
+  })
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    throw new Error(`Picsart blend failed (${response.status}): ${detail.slice(0, 200)}`)
+  }
+
+  const json = await response.json()
+  const resultUrl = json?.data?.url
+  if (!resultUrl) throw new Error('Picsart blend returned no result URL')
+
+  const resultBlob = await fetch(resultUrl).then((r) => r.blob())
+  return blobToDataUrl(resultBlob)
+}
+
+/**
+ * Renders the tattoo image onto a transparent canvas at the exact pixel
+ * dimensions of the skin photo, positioned/sized/rotated to match what the
+ * user placed on screen — i.e. flattens the on-screen overlay into a single
+ * PNG suitable for Picsart's /blend `overlay_image` parameter.
+ *
+ * displayScale converts on-screen CSS pixel coordinates (against the
+ * CANVAS_W x CANVAS_H preview box) into the skin photo's native pixel
+ * dimensions, since the photo is rendered with object-cover and may differ
+ * in native resolution and aspect ratio from the preview box.
+ */
+function renderOverlayToNativeCanvas({ skinImgEl, tattooImgEl, pos, size, rotation }) {
+  const nativeW = skinImgEl.naturalWidth
+  const nativeH = skinImgEl.naturalHeight
+
+  // object-cover math: figure out the crop/scale the browser applied so we
+  // can map preview-box coordinates back to native photo coordinates.
+  const boxRatio = CANVAS_W / CANVAS_H
+  const imgRatio = nativeW / nativeH
+  let scale, offsetX, offsetY
+  if (imgRatio > boxRatio) {
+    // photo is wider than box: box height matches, width is cropped
+    scale = nativeH / CANVAS_H
+    offsetX = (nativeW - CANVAS_W * scale) / 2
+    offsetY = 0
+  } else {
+    // photo is taller than box: box width matches, height is cropped
+    scale = nativeW / CANVAS_W
+    offsetX = 0
+    offsetY = (nativeH - CANVAS_H * scale) / 2
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = nativeW
+  canvas.height = nativeH
+  const ctx = canvas.getContext('2d')
+
+  const nativeX = pos.x * scale + offsetX
+  const nativeY = pos.y * scale + offsetY
+  const nativeSize = size * scale
+
+  ctx.save()
+  ctx.translate(nativeX + nativeSize / 2, nativeY + nativeSize / 2)
+  ctx.rotate((rotation * Math.PI) / 180)
+  ctx.drawImage(tattooImgEl, -nativeSize / 2, -nativeSize / 2, nativeSize, nativeSize)
+  ctx.restore()
+
+  return canvas.toDataURL('image/png')
+}
+
+/** Loads an <img> element from a dataURL/URL, resolving once it's decoded. */
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => resolve(img)
+    img.onerror = reject
+    img.src = src
+  })
 }
 
 export default function SmartTryOn() {
@@ -137,7 +228,8 @@ export default function SmartTryOn() {
 
   const [enhancing, setEnhancing] = useState(false)
   const [enhanced, setEnhanced] = useState(false)
-  const [enhanceMeta, setEnhanceMeta] = useState(null)
+  const [enhancedResult, setEnhancedResult] = useState(null) // dataURL of the Picsart /blend result
+  const [enhanceError, setEnhanceError] = useState(null)
 
   const clamp = (val, min, max) => Math.min(Math.max(val, min), max)
 
@@ -157,7 +249,8 @@ export default function SmartTryOn() {
     const dataUrl = await readFileAsDataUrl(file)
     setSkinPhoto(dataUrl)
     setEnhanced(false)
-    setEnhanceMeta(null)
+    setEnhancedResult(null)
+    setEnhanceError(null)
     e.target.value = ''
   }
 
@@ -170,29 +263,22 @@ export default function SmartTryOn() {
     setBgRemoved(false)
     setBgRemovalError(null)
     setEnhanced(false)
-    setEnhanceMeta(null)
+    setEnhancedResult(null)
+    setEnhanceError(null)
     setPos({ x: CANVAS_W / 2 - 75, y: CANVAS_H / 2 - 75 })
     setSize(150)
     setRotation(0)
     e.target.value = ''
   }
 
-  // ---- Background removal (client-side AI model, @imgly/background-removal) ----
+  // ---- Background removal (Picsart /removebg — fast, hosted) ----
 
   const handleRemoveBackground = async () => {
     if (!tattooSrc) return
     setRemovingBg(true)
     setBgRemovalError(null)
     try {
-      // Lazy-loaded so the segmentation model bundle only downloads when used.
-      const { removeBackground } = await import('@imgly/background-removal')
-      const blob = await removeBackground(tattooSrc)
-      const dataUrl = await new Promise((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload = () => resolve(reader.result)
-        reader.onerror = reject
-        reader.readAsDataURL(blob)
-      })
+      const dataUrl = await picsartRemoveBackground(tattooSrc)
       setTattooSrc(dataUrl)
       setBgRemoved(true)
     } catch (err) {
@@ -291,22 +377,38 @@ export default function SmartTryOn() {
     }
   }, [handlePointerMove])
 
-  // ---- Enhance (AI-assisted, with graceful local fallback) -------------
+  // ---- Enhance (real compositing via Picsart /blend) --------------------
 
   const handleEnhance = async () => {
-    if (!tattooSrc || !skinPhoto) return
+    if (!tattooSrc || !skinPhoto || !skinImgRef.current) return
+    if (!skinImgRef.current.complete || skinImgRef.current.naturalWidth === 0) {
+      setEnhanceError('Your photo is still loading — please wait a moment and try again.')
+      return
+    }
     setEnhancing(true)
+    setEnhanceError(null)
     try {
-      const meta = await aiEnhanceComposite({ skinDataUrl: skinPhoto })
+      const tattooImgEl = await loadImage(tattooSrc)
+      const overlayDataUrl = renderOverlayToNativeCanvas({
+        skinImgEl: skinImgRef.current,
+        tattooImgEl,
+        pos,
+        size,
+        rotation,
+      })
 
-      if (meta.source === 'local-fallback' && skinImgRef.current?.complete) {
-        const lum = sampleAverageLuminance(skinImgRef.current)
-        meta.contrast = lum < 100 ? 118 : lum > 180 ? 106 : 112
-        meta.saturation = lum < 100 ? 122 : 114
-      }
+      const blendedDataUrl = await picsartBlend({
+        skinDataUrl: skinPhoto,
+        overlayDataUrl,
+        opacityPercent: 88,
+      })
 
-      setEnhanceMeta(meta)
+      setEnhancedResult(blendedDataUrl)
       setEnhanced(true)
+    } catch (err) {
+      setEnhanceError(
+        'Enhance is unavailable right now — showing your draft placement instead. Please try again in a moment.',
+      )
     } finally {
       setEnhancing(false)
     }
@@ -317,7 +419,8 @@ export default function SmartTryOn() {
     setSize(150)
     setRotation(0)
     setEnhanced(false)
-    setEnhanceMeta(null)
+    setEnhancedResult(null)
+    setEnhanceError(null)
   }
 
   const handleStartOver = () => {
@@ -419,8 +522,8 @@ export default function SmartTryOn() {
                 </div>
               )}
 
-              {/* Tattoo overlay */}
-              {skinPhoto && tattooSrc && (
+              {/* Draggable draft overlay — hidden once the real enhanced result is showing */}
+              {skinPhoto && tattooSrc && !enhanced && (
                 <div
                   onMouseDown={handlePointerDown}
                   onTouchStart={handlePointerDown}
@@ -443,23 +546,23 @@ export default function SmartTryOn() {
                     src={tattooSrc}
                     alt="Tattoo design preview"
                     draggable={false}
-                    className="w-full h-full object-contain transition-[filter,opacity] duration-500"
-                    style={{
-                      mixBlendMode: enhanced ? 'multiply' : 'normal',
-                      opacity: enhanced ? enhanceMeta?.opacity ?? 0.92 : 0.9,
-                      filter: enhanced
-                        ? `contrast(${enhanceMeta?.contrast ?? 112}%) saturate(${enhanceMeta?.saturation ?? 116}%)`
-                        : 'contrast(100%) saturate(100%)',
-                    }}
+                    className="w-full h-full object-contain opacity-90"
                   />
-                  {!enhanced && (
-                    <div className="absolute inset-0 border-2 border-dashed border-gold/70 rounded-sm pointer-events-none flex items-center justify-center">
-                      {activeTool === 'move' && <Move className="text-gold/70" size={20} />}
-                      {activeTool === 'resize' && <Maximize2 className="text-gold/70" size={20} />}
-                      {activeTool === 'rotate' && <RotateCw className="text-gold/70" size={20} />}
-                    </div>
-                  )}
+                  <div className="absolute inset-0 border-2 border-dashed border-gold/70 rounded-sm pointer-events-none flex items-center justify-center">
+                    {activeTool === 'move' && <Move className="text-gold/70" size={20} />}
+                    {activeTool === 'resize' && <Maximize2 className="text-gold/70" size={20} />}
+                    {activeTool === 'rotate' && <RotateCw className="text-gold/70" size={20} />}
+                  </div>
                 </div>
+              )}
+
+              {/* Real AI-blended result from Picsart /blend, once available */}
+              {enhanced && enhancedResult && (
+                <img
+                  src={enhancedResult}
+                  alt="AI-enhanced tattoo preview"
+                  className="absolute inset-0 w-full h-full object-cover"
+                />
               )}
 
               {ready && (
@@ -503,33 +606,34 @@ export default function SmartTryOn() {
               onChange={handleTattooUpload}
             />
 
-            {/* Placement toolbar */}
+            {/* Placement toolbar — editing tools only make sense pre-enhance */}
             {ready && (
               <div className="flex gap-2 mt-4 max-w-[520px] mx-auto">
-                {[
-                  { id: 'move', label: 'Move', icon: Move },
-                  { id: 'resize', label: 'Size', icon: Maximize2 },
-                  { id: 'rotate', label: 'Rotate', icon: RotateCw },
-                ].map((t) => (
-                  <button
-                    key={t.id}
-                    onClick={() => setActiveTool(t.id)}
-                    className={`flex-1 flex flex-col items-center gap-1.5 py-3 rounded-md border text-xs tracking-wide transition-colors ${
-                      activeTool === t.id
-                        ? 'border-gold text-gold bg-gold/5'
-                        : 'border-ink-line text-white/50 hover:border-white/30'
-                    }`}
-                  >
-                    <t.icon size={16} />
-                    {t.label.toUpperCase()}
-                  </button>
-                ))}
+                {!enhanced &&
+                  [
+                    { id: 'move', label: 'Move', icon: Move },
+                    { id: 'resize', label: 'Size', icon: Maximize2 },
+                    { id: 'rotate', label: 'Rotate', icon: RotateCw },
+                  ].map((t) => (
+                    <button
+                      key={t.id}
+                      onClick={() => setActiveTool(t.id)}
+                      className={`flex-1 flex flex-col items-center gap-1.5 py-3 rounded-md border text-xs tracking-wide transition-colors ${
+                        activeTool === t.id
+                          ? 'border-gold text-gold bg-gold/5'
+                          : 'border-ink-line text-white/50 hover:border-white/30'
+                      }`}
+                    >
+                      <t.icon size={16} />
+                      {t.label.toUpperCase()}
+                    </button>
+                  ))}
                 <button
                   onClick={handleReset}
                   className="flex-1 flex flex-col items-center gap-1.5 py-3 rounded-md border border-ink-line text-white/50 hover:border-white/30 text-xs tracking-wide transition-colors"
                 >
                   <RotateCcw size={16} />
-                  RESET
+                  {enhanced ? 'EDIT PLACEMENT' : 'RESET'}
                 </button>
               </div>
             )}
@@ -630,13 +734,18 @@ export default function SmartTryOn() {
             <div className="flex flex-col gap-3 pt-2">
               <button
                 onClick={handleEnhance}
-                disabled={!ready || enhancing}
+                disabled={!ready || enhancing || enhanced}
                 className="gold-btn flex items-center justify-center gap-2"
               >
                 {enhancing ? (
                   <>
                     <Loader2 size={16} className="animate-spin" />
                     Enhancing...
+                  </>
+                ) : enhanced ? (
+                  <>
+                    <CheckCircle2 size={16} />
+                    Enhanced
                   </>
                 ) : (
                   <>
@@ -645,9 +754,10 @@ export default function SmartTryOn() {
                   </>
                 )}
               </button>
-              {enhanced && enhanceMeta?.source === 'local-fallback' && (
-                <p className="text-[11px] text-white/35 text-center">
-                  Enhanced using local blend — AI service unavailable.
+              {enhanceError && (
+                <p className="flex items-start gap-1.5 text-[11px] text-white/40">
+                  <AlertCircle size={12} className="mt-0.5 shrink-0" />
+                  {enhanceError}
                 </p>
               )}
               <button
