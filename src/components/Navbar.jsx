@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
-import { Menu, X } from 'lucide-react'
+import { Menu, X, User } from 'lucide-react'
 
 const LINKS = [
   { label: 'Portfolio', href: '#portfolio' },
@@ -9,7 +9,7 @@ const LINKS = [
   { label: 'Studio', href: '#booking' },
 ]
 
-export default function Navbar({ onBookNow }) {
+export default function Navbar({ onBookNow, onClientLogin }) {
   const [scrolled, setScrolled] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
 
@@ -47,7 +47,16 @@ export default function Navbar({ onBookNow }) {
           ))}
         </div>
 
-        <div className="hidden md:block">
+        <div className="hidden md:flex items-center gap-4">
+          {onClientLogin && (
+            <button
+              onClick={onClientLogin}
+              className="flex items-center gap-1.5 text-sm tracking-wide text-white/70 hover:text-gold transition-colors duration-300"
+            >
+              <User size={15} />
+              Client Login
+            </button>
+          )}
           <button onClick={onBookNow} className="gold-btn !px-6 !py-2.5 text-sm">
             Book Consultation
           </button>
@@ -79,6 +88,18 @@ export default function Navbar({ onBookNow }) {
               {l.label}
             </a>
           ))}
+          {onClientLogin && (
+            <button
+              onClick={() => {
+                setMobileOpen(false)
+                onClientLogin()
+              }}
+              className="flex items-center gap-2 text-white/80 hover:text-gold text-base text-left"
+            >
+              <User size={17} />
+              Client Login
+            </button>
+          )}
           <button
             onClick={() => {
               setMobileOpen(false)

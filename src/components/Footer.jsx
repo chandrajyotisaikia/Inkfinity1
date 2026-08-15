@@ -1,4 +1,5 @@
 import React from 'react'
+import { Link } from 'react-router-dom'
 import { Instagram, Mail, MapPin } from 'lucide-react'
 
 export default function Footer() {
@@ -53,6 +54,12 @@ export default function Footer() {
           <p className="text-white/35 text-xs sm:text-sm tracking-wide">
             Copyright © 2026 Chandrajyoti Saikia. All Rights Reserved. Engineered for Inkfinity.
           </p>
+          <Link
+            to="/admin"
+            className="inline-block mt-3 text-[11px] text-white/20 hover:text-gold/60 transition-colors tracking-wide"
+          >
+            Admin Login
+          </Link>
         </div>
       </div>
     </footer>
