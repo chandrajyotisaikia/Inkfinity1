@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: inkfinity-studio-academy
+    runtime: static
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    routes:
+      # Required for react-router-dom: without this, a direct visit or
+      # refresh on /waiver or /admin 404s, because there's no matching
+      # static file at that path — only index.html knows how to render it.
+      - type: rewrite
+        source: /*
+        destination: /index.html
